@@ -20,7 +20,12 @@ import { sendMediaFeishu } from "./media.js";
 import type { MentionTarget } from "./mention.js";
 import { buildMentionedCardContent } from "./mention.js";
 import { getFeishuRuntime } from "./runtime.js";
-import { sendMessageFeishu, sendStructuredCardFeishu, type CardHeaderConfig } from "./send.js";
+import {
+  sendCardFeishu,
+  sendMessageFeishu,
+  sendStructuredCardFeishu,
+  type CardHeaderConfig,
+} from "./send.js";
 import { FeishuStreamingSession, mergeStreamingText } from "./streaming-card.js";
 import { resolveReceiveIdType } from "./targets.js";
 import { addTypingIndicator, removeTypingIndicator, type TypingIndicatorState } from "./typing.js";
@@ -368,6 +373,40 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     });
   };
 
+  const maybeSendCursorxPlanApproval = async (infoKind?: string) => {
+    if (
+      infoKind !== "final" ||
+      approvalCardSent ||
+      !params.sessionKey ||
+      !params.operatorOpenId
+    ) {
+      return;
+    }
+    const acpMeta = readAcpSessionEntry({
+      cfg,
+      sessionKey: params.sessionKey,
+    });
+    if (!acpMeta || !shouldEmitCursorxPlanApproval(acpMeta)) {
+      return;
+    }
+    approvalCardSent = true;
+    await sendCardFeishu({
+      cfg,
+      to: chatId,
+      accountId,
+      card: createApprovalCard({
+        operatorOpenId: params.operatorOpenId,
+        chatId,
+        command: `/acp steer --session ${params.sessionKey} Continue implementing with the approved plan.`,
+        prompt: "Plan is ready. Approve to continue into build/execution in the same session.",
+        confirmLabel: "Approve and build",
+        cancelLabel: "Keep planning",
+        sessionKey: params.sessionKey,
+        expiresAt: Date.now() + 10 * 60_000,
+      }),
+    });
+  };
+
   const { dispatcher, replyOptions, markDispatchIdle } =
     core.channel.reply.createReplyDispatcherWithTyping({
       responsePrefix: prefixContext.responsePrefix,
@@ -426,6 +465,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
               streamText = mergeStreamingText(streamText, text);
               await closeStreaming();
               deliveredFinalTexts.add(text);
+              await maybeSendCursorxPlanApproval(info.kind);
             }
             // Send media even when streaming handled the text
             if (hasMedia) {
@@ -474,38 +514,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
             });
           }
 
-          const acpMeta = params.sessionKey
-            ? readAcpSessionEntry({
-                cfg,
-                sessionKey: params.sessionKey,
-              })
-            : undefined;
-          const isCursorxPlanPhase = acpMeta ? shouldEmitCursorxPlanApproval(acpMeta) : false;
-          if (
-            info?.kind === "final" &&
-            isCursorxPlanPhase &&
-            !approvalCardSent &&
-            params.sessionKey &&
-            params.operatorOpenId
-          ) {
-            approvalCardSent = true;
-            await sendCardFeishu({
-              cfg,
-              to: chatId,
-              accountId,
-              card: createApprovalCard({
-                operatorOpenId: params.operatorOpenId,
-                chatId,
-                command: `/acp steer --session ${params.sessionKey} Continue implementing with the approved plan.`,
-                prompt:
-                  "Plan is ready. Approve to continue into build/execution in the same session.",
-                confirmLabel: "Approve and build",
-                cancelLabel: "Keep planning",
-                sessionKey: params.sessionKey,
-                expiresAt: Date.now() + 10 * 60_000,
-              }),
-            });
-          }
+          await maybeSendCursorxPlanApproval(info?.kind);
         }
 
         if (hasMedia) {

@@ -361,6 +361,15 @@ export function buildBuiltinChatCommands(): ChatCommandDefinition[] {
       argsMenu: "auto",
     }),
     defineChatCommand({
+      key: "cursorx",
+      description:
+        "Start a sandbox wizard, then auto-spawn a Cursor ACP session and trigger Ask-Plan-Build.",
+      textAlias: "/cursor-start",
+      acceptsArgs: true,
+      scope: "text",
+      category: "management",
+    }),
+    defineChatCommand({
       key: "focus",
       nativeName: "focus",
       description:

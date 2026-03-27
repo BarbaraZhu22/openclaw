@@ -45,6 +45,13 @@ type CursorxSession = {
   lastStatusText?: string;
 };
 
+type TurnLogState = {
+  mode: "prompt" | "steer";
+  outputText: string;
+  sawThought: boolean;
+  sawToolCall: boolean;
+};
+
 class RuntimeEventQueue {
   private readonly items: AcpRuntimeEvent[] = [];
   private done = false;
@@ -309,9 +316,35 @@ export class CursorxRuntime implements AcpRuntime {
     return args;
   }
 
+  private logDebug(message: string): void {
+    this.logger?.debug?.(`[cursorx] ${message}`);
+  }
+
+  private logInfo(message: string): void {
+    this.logger?.info(`[cursorx] ${message}`);
+  }
+
+  private logWarn(message: string): void {
+    this.logger?.warn(`[cursorx] ${message}`);
+  }
+
+  private appendTruncated(current: string, next: string, limit = 240): string {
+    if (!next) {
+      return current;
+    }
+    const merged = current + next;
+    if (merged.length <= limit) {
+      return merged;
+    }
+    return `${merged.slice(0, limit)}…`;
+  }
+
   private async createSession(input: AcpRuntimeEnsureInput): Promise<CursorxSession> {
     const cwd = input.cwd?.trim() || this.config.cwd;
     const args = this.buildSpawnArgs();
+    this.logInfo(
+      `spawning Cursor ACP process (session=${input.sessionKey}, cwd=${cwd}, command=${this.config.command} ${args.join(" ")})`,
+    );
     const child = spawn(this.config.command, args, {
       cwd,
       env: {
@@ -324,6 +357,11 @@ export class CursorxRuntime implements AcpRuntime {
     if (!child.stdin || !child.stdout) {
       throw new AcpRuntimeError("ACP_BACKEND_NOT_AVAILABLE", "Could not open Cursor ACP pipes.");
     }
+    child.once("exit", (code, signal) => {
+      const reason =
+        signal != null ? `signal=${signal}` : code != null ? `exitCode=${code}` : "exitCode=unknown";
+      this.logWarn(`Cursor ACP process exited (session=${input.sessionKey}, ${reason})`);
+    });
 
     const inputStream = Writable.toWeb(child.stdin);
     const outputStream = Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>;
@@ -351,7 +389,9 @@ export class CursorxRuntime implements AcpRuntime {
             for (const event of mapped) {
               if (event.type === "status") {
                 current.lastStatusText = event.text;
+                this.logDebug(`status (session=${current.sessionKey}): ${event.text}`);
               }
+              this.captureTurnLogEvent(current, event);
               current.activeTurn.push(event);
             }
           },
@@ -385,12 +425,14 @@ export class CursorxRuntime implements AcpRuntime {
         mcpServers: [],
       });
       session.acpSessionId = loaded.sessionId;
+      this.logInfo(`connected to existing Cursor session (session=${input.sessionKey}, backendSessionId=${session.acpSessionId})`);
     } else {
       const created = await session.connection.newSession({
         cwd,
         mcpServers: [],
       });
       session.acpSessionId = created.sessionId;
+      this.logInfo(`created new Cursor session (session=${input.sessionKey}, backendSessionId=${session.acpSessionId})`);
     }
 
     if (session.runtimeMode) {
@@ -398,6 +440,27 @@ export class CursorxRuntime implements AcpRuntime {
     }
     this.sessionsById.set(state.id, session);
     return session;
+  }
+
+  private captureTurnLogEvent(session: CursorxSession, event: AcpRuntimeEvent): void {
+    const turnLog = (session.activeTurn as RuntimeEventQueue & { __turnLog?: TurnLogState } | null)?.__turnLog;
+    if (!turnLog) {
+      return;
+    }
+    if (event.type === "text_delta") {
+      if (!event.text) {
+        return;
+      }
+      if (!event.stream || event.stream === "output") {
+        turnLog.outputText = this.appendTruncated(turnLog.outputText, event.text);
+      } else if (event.stream === "thought") {
+        turnLog.sawThought = true;
+      }
+      return;
+    }
+    if (event.type === "tool_call") {
+      turnLog.sawToolCall = true;
+    }
   }
 
   private async setSessionMode(session: CursorxSession, mode: string): Promise<void> {
@@ -412,6 +475,7 @@ export class CursorxRuntime implements AcpRuntime {
       modeId: mode,
     });
     session.runtimeMode = mode;
+    this.logInfo(`mode set to ${mode} (session=${session.sessionKey}, backendSessionId=${session.acpSessionId})`);
   }
 
   private resolveSessionFromHandle(handle: AcpRuntimeHandle): CursorxSession {
@@ -441,7 +505,18 @@ export class CursorxRuntime implements AcpRuntime {
     const session = this.resolveSessionFromHandle(input.handle);
     const queue = new RuntimeEventQueue();
     session.activeTurn = queue;
+    (
+      queue as RuntimeEventQueue & {
+        __turnLog?: TurnLogState;
+      }
+    ).__turnLog = {
+      mode: input.mode,
+      outputText: "",
+      sawThought: false,
+      sawToolCall: false,
+    };
     const runId = randomUUID();
+    this.logInfo(`turn started (session=${session.sessionKey}, mode=${input.mode}, requestId=${input.requestId})`);
 
     const maybeCancelOnAbort = () => {
       if (!input.signal || !input.signal.aborted) {
@@ -473,6 +548,9 @@ export class CursorxRuntime implements AcpRuntime {
           ...(response.stopReason ? { stopReason: response.stopReason } : {}),
         });
       } catch (error) {
+        this.logWarn(
+          `turn failed (session=${session.sessionKey}, mode=${input.mode}): ${error instanceof Error ? error.message : String(error)}`,
+        );
         queue.push({
           type: "error",
           message: error instanceof Error ? error.message : String(error),
@@ -489,6 +567,27 @@ export class CursorxRuntime implements AcpRuntime {
         yield event;
       }
     } finally {
+      const turnLog = (
+        queue as RuntimeEventQueue & {
+          __turnLog?: TurnLogState;
+        }
+      ).__turnLog;
+      const finalSummary = turnLog?.outputText.trim();
+      if (finalSummary) {
+        this.logInfo(
+          `turn completed (session=${session.sessionKey}, mode=${input.mode}, final=${JSON.stringify(finalSummary)})`,
+        );
+      } else {
+        const hints = [
+          turnLog?.sawThought ? "thought-only" : null,
+          turnLog?.sawToolCall ? "tool-calls" : null,
+        ]
+          .filter(Boolean)
+          .join(", ");
+        this.logInfo(
+          `turn completed (session=${session.sessionKey}, mode=${input.mode}, no final output${hints ? `; observed ${hints}` : ""})`,
+        );
+      }
       input.signal?.removeEventListener("abort", maybeCancelOnAbort);
       session.activeTurn = null;
     }

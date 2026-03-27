@@ -5,6 +5,7 @@ import { handleBashCommand } from "./commands-bash.js";
 import { handleBtwCommand } from "./commands-btw.js";
 import { handleCompactCommand } from "./commands-compact.js";
 import { handleConfigCommand, handleDebugCommand } from "./commands-config.js";
+import { handleCursorxCommand } from "./commands-cursorx.js";
 import {
   handleCommandsListCommand,
   handleContextCommand,
@@ -53,6 +54,7 @@ export function loadCommandHandlers(): CommandHandler[] {
     handleContextCommand,
     handleExportSessionCommand,
     handleWhoamiCommand,
+    handleCursorxCommand,
     handleSubagentsCommand,
     handleAcpCommand,
     handleMcpCommand,

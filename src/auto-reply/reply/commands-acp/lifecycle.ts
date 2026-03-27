@@ -483,6 +483,18 @@ async function runAcpSteer(params: {
 }): Promise<string> {
   const acpManager = getAcpSessionManager();
   let output = "";
+  let thought = "";
+
+  const appendLimited = (current: string, next: string): string => {
+    if (!next) {
+      return current;
+    }
+    const merged = current + next;
+    if (merged.length <= ACP_STEER_OUTPUT_LIMIT) {
+      return merged;
+    }
+    return `${merged.slice(0, ACP_STEER_OUTPUT_LIMIT)}…`;
+  };
 
   await acpManager.runTurn({
     cfg: params.cfg,
@@ -494,18 +506,19 @@ async function runAcpSteer(params: {
       if (event.type !== "text_delta") {
         return;
       }
-      if (event.stream && event.stream !== "output") {
+      if (!event.text) {
         return;
       }
-      if (event.text) {
-        output += event.text;
-        if (output.length > ACP_STEER_OUTPUT_LIMIT) {
-          output = `${output.slice(0, ACP_STEER_OUTPUT_LIMIT)}…`;
-        }
+      if (!event.stream || event.stream === "output") {
+        output = appendLimited(output, event.text);
+        return;
+      }
+      if (event.stream === "thought") {
+        thought = appendLimited(thought, event.text);
       }
     },
   });
-  return output.trim();
+  return (output.trim() || thought.trim()).trim();
 }
 
 export async function handleAcpSteerAction(
