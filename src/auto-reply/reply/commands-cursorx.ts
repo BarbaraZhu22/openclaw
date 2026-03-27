@@ -1,6 +1,7 @@
 import { handleAcpSpawnAction, handleAcpSteerAction } from "./commands-acp/lifecycle.js";
 import { rejectUnauthorizedCommand } from "./command-gates.js";
 import type { CommandHandler } from "./commands-types.js";
+import { updateSessionStore } from "../../config/sessions/store.js";
 import { executePluginCommand, matchPluginCommand } from "../../plugins/commands.js";
 
 const COMMAND = "/cursor-start";
@@ -13,6 +14,10 @@ const START_USAGE = [
   "/cursor-start <wizard-reply>",
 ].join("\n");
 
+function rewriteSandboxWizardText(text: string): string {
+  return text.replaceAll("/sandbox-start", COMMAND);
+}
+
 function stopWithText(text: string) {
   return {
     shouldContinue: false as const,
@@ -20,22 +25,36 @@ function stopWithText(text: string) {
   };
 }
 
-function parseCursorxStartArgs(commandBody: string): { ok: true; translatedBody: string } | { ok: false } {
-  if (!commandBody.startsWith(COMMAND)) {
+function parseCursorxStartArgs(
+  commandBody: string,
+  allowContinuation: boolean,
+): { ok: true; translatedBody: string } | { ok: false } {
+  if (commandBody.startsWith(COMMAND)) {
+    const rest = commandBody.slice(COMMAND.length).trim();
+    if (!rest) {
+      return { ok: true, translatedBody: SANDBOX_COMMAND };
+    }
+    const tokens = rest.split(/\s+/).filter(Boolean);
+    if (tokens[0]?.toLowerCase() === "help") {
+      return { ok: true, translatedBody: "" };
+    }
+    const translatedArgs =
+      tokens[0]?.toLowerCase() === "start" ? rest.slice(tokens[0].length).trim() : rest;
+    return {
+      ok: true,
+      translatedBody: translatedArgs ? `${SANDBOX_COMMAND} ${translatedArgs}` : SANDBOX_COMMAND,
+    };
+  }
+  if (!allowContinuation) {
     return { ok: false };
   }
-  const rest = commandBody.slice(COMMAND.length).trim();
-  if (!rest) {
-    return { ok: true, translatedBody: SANDBOX_COMMAND };
+  const followup = commandBody.trim();
+  if (!followup || followup.startsWith("/")) {
+    return { ok: false };
   }
-  const tokens = rest.split(/\s+/).filter(Boolean);
-  if (tokens[0]?.toLowerCase() === "help") {
-    return { ok: true, translatedBody: "" };
-  }
-  const translatedArgs = tokens[0]?.toLowerCase() === "start" ? rest.slice(tokens[0].length).trim() : rest;
   return {
     ok: true,
-    translatedBody: translatedArgs ? `${SANDBOX_COMMAND} ${translatedArgs}` : SANDBOX_COMMAND,
+    translatedBody: `${SANDBOX_COMMAND} ${followup}`,
   };
 }
 
@@ -49,11 +68,38 @@ function parseSpawnedAcpSessionKey(text: string): string | null {
   return match?.[0] ?? null;
 }
 
+async function setCursorStartPendingState(params: Parameters<CommandHandler>[0], pending: boolean) {
+  if (!params.sessionStore) {
+    return;
+  }
+  const currentEntry = params.sessionStore[params.sessionKey] ?? params.sessionEntry;
+  if (!currentEntry) {
+    return;
+  }
+  const updatedEntry = pending
+    ? { ...currentEntry, cursorStartPending: true }
+    : { ...currentEntry, cursorStartPending: undefined };
+  params.sessionStore[params.sessionKey] = updatedEntry;
+  if (params.sessionEntry) {
+    Object.assign(params.sessionEntry, updatedEntry);
+  }
+  if (!params.storePath) {
+    return;
+  }
+  await updateSessionStore(params.storePath, (store) => {
+    const persisted = store[params.sessionKey] ?? currentEntry;
+    store[params.sessionKey] = pending
+      ? { ...persisted, cursorStartPending: true }
+      : { ...persisted, cursorStartPending: undefined };
+  });
+}
+
 export const handleCursorxCommand: CommandHandler = async (params, allowTextCommands) => {
   if (!allowTextCommands) {
     return null;
   }
-  const parsed = parseCursorxStartArgs(params.command.commandBodyNormalized);
+  const hasPendingWizard = params.sessionEntry?.cursorStartPending === true;
+  const parsed = parseCursorxStartArgs(params.command.commandBodyNormalized, hasPendingWizard);
   if (!parsed.ok) {
     return null;
   }
@@ -68,6 +114,7 @@ export const handleCursorxCommand: CommandHandler = async (params, allowTextComm
 
   const match = matchPluginCommand(parsed.translatedBody);
   if (!match || match.command.name !== "sandbox-start") {
+    await setCursorStartPendingState(params, false);
     return stopWithText(
       "⚠️ /cursor-start start requires the start-ai-project plugin command `/sandbox-start`, but it is unavailable.",
     );
@@ -92,13 +139,19 @@ export const handleCursorxCommand: CommandHandler = async (params, allowTextComm
         : undefined,
   });
 
-  const sandboxText = typeof sandboxResult.text === "string" ? sandboxResult.text : "";
+  const sandboxText =
+    typeof sandboxResult.text === "string" ? rewriteSandboxWizardText(sandboxResult.text) : "";
   if (!sandboxText.includes("Sandbox ready.")) {
+    await setCursorStartPendingState(params, true);
     return {
       shouldContinue: false,
-      reply: sandboxResult,
+      reply: {
+        ...sandboxResult,
+        ...(typeof sandboxResult.text === "string" ? { text: sandboxText } : {}),
+      },
     };
   }
+  await setCursorStartPendingState(params, false);
 
   const workspacePath = parseSandboxWorkspace(sandboxText);
   if (!workspacePath) {
@@ -125,7 +178,17 @@ export const handleCursorxCommand: CommandHandler = async (params, allowTextComm
     "--label",
     "cursorx-start",
   ];
-  const spawnResult = await handleAcpSpawnAction(params, spawnTokens);
+  const cursorxSpawnParams = {
+    ...params,
+    cfg: {
+      ...params.cfg,
+      acp: {
+        ...params.cfg.acp,
+        backend: "cursorx",
+      },
+    },
+  };
+  const spawnResult = await handleAcpSpawnAction(cursorxSpawnParams, spawnTokens);
   const spawnText = spawnResult.reply?.text ?? "";
   const sessionKey = parseSpawnedAcpSessionKey(spawnText);
   if (!sessionKey) {

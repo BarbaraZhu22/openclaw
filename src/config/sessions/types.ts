@@ -182,6 +182,8 @@ export type SessionEntry = {
   lastThreadId?: string | number;
   skillsSnapshot?: SessionSkillSnapshot;
   systemPromptReport?: SessionSystemPromptReport;
+  /** Marks an in-progress `/cursor-start` wizard so plain follow-ups continue command dispatch. */
+  cursorStartPending?: boolean;
   acp?: SessionAcpMeta;
 };
 

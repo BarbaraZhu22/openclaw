@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import path from "node:path";
 import { Readable, Writable } from "node:stream";
 import {
   ClientSideConnection,
@@ -110,6 +111,49 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+const WINDOWS_UNSAFE_CMD_CHARS_RE = /[&|<>^%\r\n]/;
+
+function isWindowsBatchCommand(command: string): boolean {
+  if (process.platform !== "win32") {
+    return false;
+  }
+  const ext = path.extname(command).toLowerCase();
+  return ext === ".cmd" || ext === ".bat";
+}
+
+function escapeForCmdExe(arg: string): string {
+  // Reject cmd metacharacters so ACP spawn args cannot become shell primitives.
+  if (WINDOWS_UNSAFE_CMD_CHARS_RE.test(arg)) {
+    throw new AcpRuntimeError(
+      "ACP_BACKEND_NOT_AVAILABLE",
+      `Unsafe Windows cmd.exe argument for cursorx spawn: ${JSON.stringify(arg)}.`,
+    );
+  }
+  if (!arg.includes(" ") && !arg.includes('"')) {
+    return arg;
+  }
+  return `"${arg.replace(/"/g, '""')}"`;
+}
+
+function buildCmdExeCommandLine(command: string, args: string[]): string {
+  return [escapeForCmdExe(command), ...args.map(escapeForCmdExe)].join(" ");
+}
+
+function resolveCursorxSpawnCommand(command: string, args: string[]): {
+  command: string;
+  args: string[];
+  windowsVerbatimArguments?: boolean;
+} {
+  if (!isWindowsBatchCommand(command)) {
+    return { command, args };
+  }
+  return {
+    command: process.env.ComSpec ?? "cmd.exe",
+    args: ["/d", "/s", "/c", buildCmdExeCommandLine(command, args)],
+    windowsVerbatimArguments: true,
+  };
 }
 
 function encodeCursorxRuntimeHandleState(state: CursorxHandleState): string {
@@ -342,10 +386,11 @@ export class CursorxRuntime implements AcpRuntime {
   private async createSession(input: AcpRuntimeEnsureInput): Promise<CursorxSession> {
     const cwd = input.cwd?.trim() || this.config.cwd;
     const args = this.buildSpawnArgs();
+    const spawnCommand = resolveCursorxSpawnCommand(this.config.command, args);
     this.logInfo(
       `spawning Cursor ACP process (session=${input.sessionKey}, cwd=${cwd}, command=${this.config.command} ${args.join(" ")})`,
     );
-    const child = spawn(this.config.command, args, {
+    const child = spawn(spawnCommand.command, spawnCommand.args, {
       cwd,
       env: {
         ...process.env,
@@ -353,6 +398,7 @@ export class CursorxRuntime implements AcpRuntime {
       },
       stdio: ["pipe", "pipe", "inherit"],
       windowsHide: true,
+      windowsVerbatimArguments: spawnCommand.windowsVerbatimArguments,
     });
     if (!child.stdin || !child.stdout) {
       throw new AcpRuntimeError("ACP_BACKEND_NOT_AVAILABLE", "Could not open Cursor ACP pipes.");
