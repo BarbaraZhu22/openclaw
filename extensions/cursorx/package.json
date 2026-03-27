@@ -1,0 +1,11 @@
+{
+  "name": "@openclaw/cursorx",
+  "version": "2026.3.26",
+  "description": "OpenClaw ACP runtime backend via Cursor CLI ACP",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

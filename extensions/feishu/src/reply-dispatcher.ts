@@ -13,6 +13,8 @@ import {
   type RuntimeEnv,
 } from "../runtime-api.js";
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
+import { readAcpSessionEntry } from "openclaw/plugin-sdk/acp-runtime";
+import { createApprovalCard } from "./card-ux-approval.js";
 import { createFeishuClient } from "./client.js";
 import { sendMediaFeishu } from "./media.js";
 import type { MentionTarget } from "./mention.js";
@@ -22,6 +24,21 @@ import { sendMessageFeishu, sendStructuredCardFeishu, type CardHeaderConfig } fr
 import { FeishuStreamingSession, mergeStreamingText } from "./streaming-card.js";
 import { resolveReceiveIdType } from "./targets.js";
 import { addTypingIndicator, removeTypingIndicator, type TypingIndicatorState } from "./typing.js";
+
+export function shouldEmitCursorxPlanApproval(acpEntry: {
+  acp?: {
+    backend?: string;
+    runtimeOptions?: {
+      runtimeMode?: string;
+    };
+  };
+}): boolean {
+  const runtimeMode = acpEntry.acp?.runtimeOptions?.runtimeMode?.trim()?.toLowerCase();
+  return (
+    acpEntry.acp?.backend === "cursorx" &&
+    (runtimeMode == null || runtimeMode === "" || runtimeMode === "plan")
+  );
+}
 
 /** Detect if text contains markdown elements that benefit from card rendering */
 function shouldUseCard(text: string): boolean {
@@ -75,6 +92,8 @@ function resolveCardNote(
 export type CreateFeishuReplyDispatcherParams = {
   cfg: ClawdbotConfig;
   agentId: string;
+  sessionKey?: string;
+  operatorOpenId?: string;
   runtime: RuntimeEnv;
   chatId: string;
   replyToMessageId?: string;
@@ -190,6 +209,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     !threadReplyMode && account.config?.streaming !== false && renderMode !== "raw";
 
   let streaming: FeishuStreamingSession | null = null;
+  let approvalCardSent = false;
   let streamText = "";
   let lastPartial = "";
   let reasoningText = "";
@@ -355,6 +375,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, agentId),
       onReplyStart: async () => {
         deliveredFinalTexts.clear();
+        approvalCardSent = false;
         if (streamingEnabled && renderMode === "card") {
           startStreaming();
         }
@@ -450,6 +471,39 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
                   accountId,
                 });
               },
+            });
+          }
+
+          const acpMeta = params.sessionKey
+            ? readAcpSessionEntry({
+                cfg,
+                sessionKey: params.sessionKey,
+              })
+            : undefined;
+          const isCursorxPlanPhase = acpMeta ? shouldEmitCursorxPlanApproval(acpMeta) : false;
+          if (
+            info?.kind === "final" &&
+            isCursorxPlanPhase &&
+            !approvalCardSent &&
+            params.sessionKey &&
+            params.operatorOpenId
+          ) {
+            approvalCardSent = true;
+            await sendCardFeishu({
+              cfg,
+              to: chatId,
+              accountId,
+              card: createApprovalCard({
+                operatorOpenId: params.operatorOpenId,
+                chatId,
+                command: `/acp steer --session ${params.sessionKey} Continue implementing with the approved plan.`,
+                prompt:
+                  "Plan is ready. Approve to continue into build/execution in the same session.",
+                confirmLabel: "Approve and build",
+                cancelLabel: "Keep planning",
+                sessionKey: params.sessionKey,
+                expiresAt: Date.now() + 10 * 60_000,
+              }),
             });
           }
         }

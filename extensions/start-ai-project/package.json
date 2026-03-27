@@ -1,0 +1,11 @@
+{
+  "name": "@openclaw/start-ai-project",
+  "version": "2026.3.26",
+  "description": "OpenClaw sandbox bootstrap helper for local repositories",
+  "type": "module",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "id": "start-ai-project",
+  "name": "Start AI Project",
+  "description": "Bootstrap sandboxes from local repositories for coding-agent workflows.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "repoListPath": {
+        "type": "string"
+      },
+      "reposRoot": {
+        "type": "string"
+      },
+      "sandboxRoot": {
+        "type": "string"
+      },
+      "groupRepoFilters": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "repoListPath": {
+      "label": "Repo List Path",
+      "help": "Optional markdown/json path that enumerates selectable repositories."
+    },
+    "reposRoot": {
+      "label": "Repositories Root",
+      "help": "Optional base directory used to resolve local repo paths."
+    },
+    "sandboxRoot": {
+      "label": "Sandbox Root",
+      "help": "Root directory where per-run sandbox copies are created."
+    },
+    "groupRepoFilters": {
+      "label": "Group Repo Filters",
+      "help": "Optional map of group chat ids to allowed repo ids. DMs still show all repos."
+    }
+  }
+}

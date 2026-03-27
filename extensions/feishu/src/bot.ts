@@ -999,6 +999,8 @@ export async function handleFeishuMessage(params: {
           const { dispatcher, replyOptions, markDispatchIdle } = createFeishuReplyDispatcher({
             cfg,
             agentId,
+            sessionKey: agentSessionKey,
+            operatorOpenId: ctx.senderOpenId,
             runtime: runtime as RuntimeEnv,
             chatId: ctx.chatId,
             replyToMessageId: replyTargetMessageId,
@@ -1100,6 +1102,8 @@ export async function handleFeishuMessage(params: {
       const { dispatcher, replyOptions, markDispatchIdle } = createFeishuReplyDispatcher({
         cfg,
         agentId: route.agentId,
+        sessionKey: route.sessionKey,
+        operatorOpenId: ctx.senderOpenId,
         runtime: runtime as RuntimeEnv,
         chatId: ctx.chatId,
         replyToMessageId: replyTargetMessageId,

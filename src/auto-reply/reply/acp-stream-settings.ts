@@ -20,7 +20,7 @@ export const ACP_TAG_VISIBILITY_DEFAULTS: Record<AcpSessionUpdateTag, boolean> =
   current_mode_update: false,
   config_option_update: false,
   session_info_update: false,
-  plan: false,
+  plan: true,
   agent_thought_chunk: false,
 };
 

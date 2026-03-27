@@ -1,0 +1,67 @@
+{
+  "id": "cursorx",
+  "name": "Cursor ACP Runtime",
+  "description": "ACP runtime backend powered by Cursor CLI (agent acp).",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "command": {
+        "type": "string"
+      },
+      "cwd": {
+        "type": "string"
+      },
+      "defaultRuntimeMode": {
+        "type": "string",
+        "enum": ["plan", "agent", "ask"]
+      },
+      "permissionMode": {
+        "type": "string",
+        "enum": ["approve-all", "approve-reads", "deny-all"]
+      },
+      "autoApproveMcpServers": {
+        "type": "boolean"
+      },
+      "trustWorkspace": {
+        "type": "boolean"
+      },
+      "args": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "command": {
+      "label": "Cursor Agent Command",
+      "help": "Command or absolute path for Cursor CLI (default: agent)."
+    },
+    "cwd": {
+      "label": "Default Working Directory",
+      "help": "Default workspace used when ACP sessions do not provide a cwd."
+    },
+    "defaultRuntimeMode": {
+      "label": "Default Runtime Mode",
+      "help": "Initial Cursor session mode used for new ACP sessions."
+    },
+    "permissionMode": {
+      "label": "Permission Mode",
+      "help": "Permission policy used when Cursor ACP requests tool approvals."
+    },
+    "autoApproveMcpServers": {
+      "label": "Auto Approve MCP Servers",
+      "help": "Pass --approve-mcps when launching Cursor ACP."
+    },
+    "trustWorkspace": {
+      "label": "Trust Workspace",
+      "help": "Pass --trust when launching Cursor ACP."
+    },
+    "args": {
+      "label": "Extra CLI Args",
+      "help": "Additional args appended before 'acp'."
+    }
+  }
+}
