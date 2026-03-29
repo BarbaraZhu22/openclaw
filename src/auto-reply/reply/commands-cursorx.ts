@@ -3,6 +3,7 @@ import { rejectUnauthorizedCommand } from "./command-gates.js";
 import type { CommandHandler } from "./commands-types.js";
 import { getAcpSessionManager } from "../../acp/control-plane/manager.js";
 import { listAcpSessionEntries } from "../../acp/runtime/session-meta.js";
+import { loadSessionStore, resolveAllAgentSessionStoreTargets } from "../../config/sessions.js";
 import {
   DISCORD_THREAD_BINDING_CHANNEL,
   MATRIX_THREAD_BINDING_CHANNEL,
@@ -15,6 +16,8 @@ const COMMAND = "/cursor-start";
 const STOP_COMMAND = "/cursor-stop";
 const SANDBOX_COMMAND = "/sandbox-start";
 const CURSORX_BACKEND_ID = "cursorx";
+const CURSORX_SLOT_LABEL_PREFIX = "cursorx-";
+const CURSORX_LEGACY_LABEL = "cursorx-start";
 const DEFAULT_HARNESS_ID = "codex";
 const DEFAULT_CURSORX_MAX_SESSIONS = 5;
 const START_USAGE = [
@@ -89,21 +92,73 @@ function resolveCursorxMaxSessions(params: Parameters<CommandHandler>[0]): numbe
 
 async function listCursorxAcpSessions(
   params: Parameters<CommandHandler>[0],
-): Promise<Array<{ sessionKey: string; updatedAt: number }>> {
+): Promise<Array<{ sessionKey: string; updatedAt: number; label?: string; storePath: string }>> {
   const entries = await listAcpSessionEntries({ cfg: params.cfg });
   return entries
     .filter((entry) => entry.acp?.backend?.trim().toLowerCase() === CURSORX_BACKEND_ID)
     .map((entry) => ({
       sessionKey: entry.sessionKey,
       updatedAt: entry.entry?.updatedAt ?? 0,
+      label: entry.entry?.label?.trim() || undefined,
+      storePath: entry.storePath,
     }))
     .toSorted((a, b) => b.updatedAt - a.updatedAt);
 }
 
+async function listLegacyCursorxLabelSessions(
+  params: Parameters<CommandHandler>[0],
+): Promise<Array<{ sessionKey: string; updatedAt: number; label: string; storePath: string }>> {
+  const storeTargets = await resolveAllAgentSessionStoreTargets(params.cfg);
+  const rows: Array<{ sessionKey: string; updatedAt: number; label: string; storePath: string }> = [];
+  for (const target of storeTargets) {
+    let store: Record<string, { label?: unknown; updatedAt?: unknown; acp?: { backend?: unknown } }>;
+    try {
+      store = loadSessionStore(target.storePath);
+    } catch {
+      continue;
+    }
+    for (const [sessionKey, entry] of Object.entries(store)) {
+      const label = typeof entry?.label === "string" ? entry.label.trim() : "";
+      if (label !== CURSORX_LEGACY_LABEL) {
+        continue;
+      }
+      const backend = typeof entry?.acp?.backend === "string" ? entry.acp.backend.trim() : "";
+      if (backend.toLowerCase() === CURSORX_BACKEND_ID) {
+        continue;
+      }
+      rows.push({
+        sessionKey,
+        updatedAt: typeof entry?.updatedAt === "number" ? entry.updatedAt : 0,
+        label,
+        storePath: target.storePath,
+      });
+    }
+  }
+  return rows;
+}
+
+function resolveCursorxSlotLabel(
+  sessions: Array<{ label?: string }>,
+  maxSessions: number,
+): string | null {
+  const used = new Set(
+    sessions.map((session) => session.label?.trim().toLowerCase()).filter((value): value is string =>
+      Boolean(value),
+    ),
+  );
+  for (let slot = 1; slot <= maxSessions; slot += 1) {
+    const candidate = `${CURSORX_SLOT_LABEL_PREFIX}${slot}`;
+    if (!used.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 async function cleanupOrphanedCursorxAcpSessions(
   params: Parameters<CommandHandler>[0],
-  sessions: Array<{ sessionKey: string; updatedAt: number }>,
-): Promise<Array<{ sessionKey: string; updatedAt: number }>> {
+  sessions: Array<{ sessionKey: string; updatedAt: number; label?: string; storePath: string }>,
+): Promise<Array<{ sessionKey: string; updatedAt: number; label?: string; storePath: string }>> {
   if (sessions.length === 0) {
     return sessions;
   }
@@ -136,41 +191,82 @@ async function cleanupOrphanedCursorxAcpSessions(
   return remaining;
 }
 
+async function clearLegacyCursorxLabel(params: {
+  storePath: string;
+  sessionKey: string;
+}): Promise<boolean> {
+  return Boolean(
+    await updateSessionStore(params.storePath, (store) => {
+      const current = store[params.sessionKey];
+      if (!current || current.label !== CURSORX_LEGACY_LABEL) {
+        return false;
+      }
+      store[params.sessionKey] = { ...current, label: undefined };
+      return true;
+    }),
+  );
+}
+
 async function handleCursorStopAll(params: Parameters<CommandHandler>[0]) {
-  const sessions = await listCursorxAcpSessions(params);
-  if (sessions.length === 0) {
+  const cursorxSessions = await listCursorxAcpSessions(params);
+  const legacyLabelSessions = await listLegacyCursorxLabelSessions(params);
+  if (cursorxSessions.length === 0 && legacyLabelSessions.length === 0) {
     return stopWithText("ℹ️ No Cursor ACP sessions are active.");
   }
   const acpManager = getAcpSessionManager();
   const bindingService = getSessionBindingService();
+  const cursorxSessionKeys = new Set(cursorxSessions.map((session) => session.sessionKey));
+  const sessions = [
+    ...cursorxSessions.map((session) => ({ ...session, legacyOnly: false as const })),
+    ...legacyLabelSessions
+      .filter((session) => !cursorxSessionKeys.has(session.sessionKey))
+      .map((session) => ({ ...session, legacyOnly: true as const })),
+  ];
   let closed = 0;
+  let legacyCleared = 0;
   let failed = 0;
   let removedBindings = 0;
   const failures: string[] = [];
-  for (const { sessionKey } of sessions) {
+  for (const session of sessions) {
     try {
-      await acpManager.closeSession({
-        cfg: params.cfg,
-        sessionKey,
-        reason: "manual-close",
-        allowBackendUnavailable: true,
-        clearMeta: true,
-      });
-      const unbound = await bindingService.unbind({
-        targetSessionKey: sessionKey,
-        reason: "manual",
-      });
-      removedBindings += unbound.length;
-      closed += 1;
+      if (session.legacyOnly) {
+        const cleared = await clearLegacyCursorxLabel({
+          storePath: session.storePath,
+          sessionKey: session.sessionKey,
+        });
+        const unbound = await bindingService.unbind({
+          targetSessionKey: session.sessionKey,
+          reason: "manual",
+        });
+        removedBindings += unbound.length;
+        if (cleared) {
+          legacyCleared += 1;
+        }
+      } else {
+        await acpManager.closeSession({
+          cfg: params.cfg,
+          sessionKey: session.sessionKey,
+          reason: "manual-close",
+          allowBackendUnavailable: true,
+          clearMeta: true,
+        });
+        const unbound = await bindingService.unbind({
+          targetSessionKey: session.sessionKey,
+          reason: "manual",
+        });
+        removedBindings += unbound.length;
+        closed += 1;
+      }
     } catch (error) {
       failed += 1;
       if (failures.length < 3) {
-        failures.push(`- ${sessionKey}: ${error instanceof Error ? error.message : String(error)}`);
+        failures.push(`- ${session.sessionKey}: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
   }
   const parts = [
-    `✅ Closed ${closed}/${sessions.length} Cursor ACP session${sessions.length === 1 ? "" : "s"}.`,
+    `✅ Closed ${closed}/${cursorxSessions.length} Cursor ACP session${cursorxSessions.length === 1 ? "" : "s"}.`,
+    `Cleared ${legacyCleared}/${legacyLabelSessions.length} legacy cursorx-start label${legacyLabelSessions.length === 1 ? "" : "s"}.`,
     `Removed ${removedBindings} binding${removedBindings === 1 ? "" : "s"}.`,
   ];
   if (failed > 0) {
@@ -324,6 +420,14 @@ export const handleCursorxCommand: CommandHandler = async (params, allowTextComm
     params,
     cursorxSessionsBeforeCleanup,
   );
+  const spawnLabel = resolveCursorxSlotLabel(cursorxSessions, maxSessions);
+  if (!spawnLabel) {
+    return stopWithText(
+      `${sandboxText}\n\n` +
+        `⚠️ Cursor ACP session limit reached (${cursorxSessions.length}/${maxSessions}). ` +
+        "Run /cursor-stop all to close existing Cursor sessions.",
+    );
+  }
   if (cursorxSessions.length >= maxSessions) {
     return stopWithText(
       `${sandboxText}\n\n` +
@@ -340,7 +444,7 @@ export const handleCursorxCommand: CommandHandler = async (params, allowTextComm
     "--cwd",
     workspacePath,
     "--label",
-    "cursorx-start",
+    spawnLabel,
   ];
   const cursorxSpawnParams = {
     ...params,
