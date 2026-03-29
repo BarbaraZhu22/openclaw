@@ -11,6 +11,7 @@ export type CursorxPluginConfig = {
   cwd?: string;
   defaultRuntimeMode?: CursorxDefaultRuntimeMode;
   permissionMode?: CursorxPermissionMode;
+  maxSessions?: number;
   autoApproveMcpServers?: boolean;
   trustWorkspace?: boolean;
   args?: string[];
@@ -21,6 +22,7 @@ export type ResolvedCursorxPluginConfig = {
   cwd: string;
   defaultRuntimeMode: CursorxDefaultRuntimeMode;
   permissionMode: CursorxPermissionMode;
+  maxSessions: number;
   autoApproveMcpServers: boolean;
   trustWorkspace: boolean;
   args: string[];
@@ -28,6 +30,7 @@ export type ResolvedCursorxPluginConfig = {
 
 const DEFAULT_PERMISSION_MODE: CursorxPermissionMode = "approve-reads";
 const DEFAULT_RUNTIME_MODE: CursorxDefaultRuntimeMode = "plan";
+const DEFAULT_MAX_SESSIONS = 5;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -48,6 +51,7 @@ function parseCursorxPluginConfig(value: unknown):
     "cwd",
     "defaultRuntimeMode",
     "permissionMode",
+    "maxSessions",
     "autoApproveMcpServers",
     "trustWorkspace",
     "args",
@@ -89,6 +93,15 @@ function parseCursorxPluginConfig(value: unknown):
     };
   }
   if (
+    value.maxSessions !== undefined &&
+    (typeof value.maxSessions !== "number" ||
+      !Number.isFinite(value.maxSessions) ||
+      !Number.isInteger(value.maxSessions) ||
+      value.maxSessions < 1)
+  ) {
+    return { ok: false, message: "maxSessions must be a positive integer" };
+  }
+  if (
     value.autoApproveMcpServers !== undefined &&
     typeof value.autoApproveMcpServers !== "boolean"
   ) {
@@ -114,6 +127,7 @@ function parseCursorxPluginConfig(value: unknown):
           : undefined,
       permissionMode:
         typeof permissionMode === "string" ? (permissionMode as CursorxPermissionMode) : undefined,
+      maxSessions: typeof value.maxSessions === "number" ? value.maxSessions : undefined,
       autoApproveMcpServers:
         typeof value.autoApproveMcpServers === "boolean" ? value.autoApproveMcpServers : undefined,
       trustWorkspace: typeof value.trustWorkspace === "boolean" ? value.trustWorkspace : undefined,
@@ -142,6 +156,7 @@ export function createCursorxPluginConfigSchema(): OpenClawPluginConfigSchema {
         cwd: { type: "string" },
         defaultRuntimeMode: { type: "string", enum: [...CURSORX_DEFAULT_RUNTIME_MODES] },
         permissionMode: { type: "string", enum: [...CURSORX_PERMISSION_MODES] },
+        maxSessions: { type: "integer", minimum: 1 },
         autoApproveMcpServers: { type: "boolean" },
         trustWorkspace: { type: "boolean" },
         args: { type: "array", items: { type: "string" } },
@@ -168,6 +183,7 @@ export function resolveCursorxPluginConfig(params: {
     cwd,
     defaultRuntimeMode: value.defaultRuntimeMode ?? DEFAULT_RUNTIME_MODE,
     permissionMode: value.permissionMode ?? DEFAULT_PERMISSION_MODE,
+    maxSessions: value.maxSessions ?? DEFAULT_MAX_SESSIONS,
     autoApproveMcpServers: value.autoApproveMcpServers ?? true,
     trustWorkspace: value.trustWorkspace ?? true,
     args: value.args ?? [],

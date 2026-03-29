@@ -1,18 +1,29 @@
 import { handleAcpSpawnAction, handleAcpSteerAction } from "./commands-acp/lifecycle.js";
 import { rejectUnauthorizedCommand } from "./command-gates.js";
 import type { CommandHandler } from "./commands-types.js";
+import { getAcpSessionManager } from "../../acp/control-plane/manager.js";
+import { listAcpSessionEntries } from "../../acp/runtime/session-meta.js";
+import {
+  DISCORD_THREAD_BINDING_CHANNEL,
+  MATRIX_THREAD_BINDING_CHANNEL,
+} from "../../channels/thread-bindings-policy.js";
 import { updateSessionStore } from "../../config/sessions/store.js";
+import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
 import { executePluginCommand, matchPluginCommand } from "../../plugins/commands.js";
 
 const COMMAND = "/cursor-start";
+const STOP_COMMAND = "/cursor-stop";
 const SANDBOX_COMMAND = "/sandbox-start";
+const CURSORX_BACKEND_ID = "cursorx";
 const DEFAULT_HARNESS_ID = "codex";
+const DEFAULT_CURSORX_MAX_SESSIONS = 5;
 const START_USAGE = [
   "Usage:",
   "/cursor-start start",
   "/cursor-start start repoId=<id> intent=\"<task>\"",
   "/cursor-start <wizard-reply>",
 ].join("\n");
+const STOP_USAGE = ["Usage:", "/cursor-stop all"].join("\n");
 
 function rewriteSandboxWizardText(text: string): string {
   return text.replaceAll("/sandbox-start", COMMAND);
@@ -68,6 +79,129 @@ function parseSpawnedAcpSessionKey(text: string): string | null {
   return match?.[0] ?? null;
 }
 
+function resolveCursorxMaxSessions(params: Parameters<CommandHandler>[0]): number {
+  const raw = params.cfg.plugins?.entries?.cursorx?.config?.maxSessions;
+  if (typeof raw !== "number" || !Number.isFinite(raw)) {
+    return DEFAULT_CURSORX_MAX_SESSIONS;
+  }
+  return Math.max(1, Math.floor(raw));
+}
+
+async function listCursorxAcpSessions(
+  params: Parameters<CommandHandler>[0],
+): Promise<Array<{ sessionKey: string; updatedAt: number }>> {
+  const entries = await listAcpSessionEntries({ cfg: params.cfg });
+  return entries
+    .filter((entry) => entry.acp?.backend?.trim().toLowerCase() === CURSORX_BACKEND_ID)
+    .map((entry) => ({
+      sessionKey: entry.sessionKey,
+      updatedAt: entry.entry?.updatedAt ?? 0,
+    }))
+    .toSorted((a, b) => b.updatedAt - a.updatedAt);
+}
+
+async function cleanupOrphanedCursorxAcpSessions(
+  params: Parameters<CommandHandler>[0],
+  sessions: Array<{ sessionKey: string; updatedAt: number }>,
+): Promise<Array<{ sessionKey: string; updatedAt: number }>> {
+  if (sessions.length === 0) {
+    return sessions;
+  }
+  const acpManager = getAcpSessionManager();
+  const bindingService = getSessionBindingService();
+  const remaining: Array<{ sessionKey: string; updatedAt: number }> = [];
+  for (const session of sessions) {
+    const bindings = bindingService.listBySession(session.sessionKey);
+    if (bindings.length > 0) {
+      remaining.push(session);
+      continue;
+    }
+    try {
+      await acpManager.closeSession({
+        cfg: params.cfg,
+        sessionKey: session.sessionKey,
+        reason: "manual-close",
+        allowBackendUnavailable: true,
+        clearMeta: true,
+      });
+      await bindingService.unbind({
+        targetSessionKey: session.sessionKey,
+        reason: "manual",
+      });
+    } catch {
+      // Keep failed cleanup candidates in the count so we do not hide limit pressure.
+      remaining.push(session);
+    }
+  }
+  return remaining;
+}
+
+async function handleCursorStopAll(params: Parameters<CommandHandler>[0]) {
+  const sessions = await listCursorxAcpSessions(params);
+  if (sessions.length === 0) {
+    return stopWithText("ℹ️ No Cursor ACP sessions are active.");
+  }
+  const acpManager = getAcpSessionManager();
+  const bindingService = getSessionBindingService();
+  let closed = 0;
+  let failed = 0;
+  let removedBindings = 0;
+  const failures: string[] = [];
+  for (const { sessionKey } of sessions) {
+    try {
+      await acpManager.closeSession({
+        cfg: params.cfg,
+        sessionKey,
+        reason: "manual-close",
+        allowBackendUnavailable: true,
+        clearMeta: true,
+      });
+      const unbound = await bindingService.unbind({
+        targetSessionKey: sessionKey,
+        reason: "manual",
+      });
+      removedBindings += unbound.length;
+      closed += 1;
+    } catch (error) {
+      failed += 1;
+      if (failures.length < 3) {
+        failures.push(`- ${sessionKey}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+  const parts = [
+    `✅ Closed ${closed}/${sessions.length} Cursor ACP session${sessions.length === 1 ? "" : "s"}.`,
+    `Removed ${removedBindings} binding${removedBindings === 1 ? "" : "s"}.`,
+  ];
+  if (failed > 0) {
+    parts.push(`⚠️ Failed to close ${failed} session${failed === 1 ? "" : "s"}.`);
+    if (failures.length > 0) {
+      parts.push(["Examples:", ...failures].join("\n"));
+    }
+  }
+  return stopWithText(parts.join("\n"));
+}
+
+function resolveCursorStartSpawnThreadMode(
+  params: Parameters<CommandHandler>[0],
+): "off" | "here" | "auto" {
+  const channel = String(
+    params.ctx.OriginatingChannel ??
+      params.command.channel ??
+      params.ctx.Surface ??
+      params.ctx.Provider ??
+      "",
+  )
+    .trim()
+    .toLowerCase();
+  if (channel !== DISCORD_THREAD_BINDING_CHANNEL && channel !== MATRIX_THREAD_BINDING_CHANNEL) {
+    return "off";
+  }
+  const threadId =
+    params.ctx.MessageThreadId != null ? String(params.ctx.MessageThreadId).trim() : "";
+  return threadId ? "here" : "auto";
+}
+
 async function setCursorStartPendingState(params: Parameters<CommandHandler>[0], pending: boolean) {
   if (!params.sessionStore) {
     return;
@@ -98,8 +232,23 @@ export const handleCursorxCommand: CommandHandler = async (params, allowTextComm
   if (!allowTextCommands) {
     return null;
   }
+  const commandBody = params.command.commandBodyNormalized.trim();
+  if (commandBody.startsWith(STOP_COMMAND)) {
+    const rest = commandBody.slice(STOP_COMMAND.length).trim().toLowerCase();
+    if (!rest || rest === "help") {
+      return stopWithText(STOP_USAGE);
+    }
+    if (rest !== "all") {
+      return stopWithText(STOP_USAGE);
+    }
+    const unauthorized = rejectUnauthorizedCommand(params, STOP_COMMAND);
+    if (unauthorized) {
+      return unauthorized;
+    }
+    return await handleCursorStopAll(params);
+  }
   const hasPendingWizard = params.sessionEntry?.cursorStartPending === true;
-  const parsed = parseCursorxStartArgs(params.command.commandBodyNormalized, hasPendingWizard);
+  const parsed = parseCursorxStartArgs(commandBody, hasPendingWizard);
   if (!parsed.ok) {
     return null;
   }
@@ -155,24 +304,39 @@ export const handleCursorxCommand: CommandHandler = async (params, allowTextComm
 
   const workspacePath = parseSandboxWorkspace(sandboxText);
   if (!workspacePath) {
+    const threadMode = resolveCursorStartSpawnThreadMode(params);
     return {
       shouldContinue: false,
       reply: {
         text:
           `${sandboxText}\n\n` +
           "⚠️ Could not parse sandbox workspace path for ACP handoff. " +
-          `Run: /acp spawn ${params.cfg.acp?.defaultAgent?.trim() || DEFAULT_HARNESS_ID} --thread here`,
+          `Run: /acp spawn ${params.cfg.acp?.defaultAgent?.trim() || DEFAULT_HARNESS_ID} --thread ${threadMode}`,
       },
     };
   }
 
   const harnessId = params.cfg.acp?.defaultAgent?.trim() || DEFAULT_HARNESS_ID;
+  const threadMode = resolveCursorStartSpawnThreadMode(params);
+  const maxSessions = resolveCursorxMaxSessions(params);
+  const cursorxSessionsBeforeCleanup = await listCursorxAcpSessions(params);
+  const cursorxSessions = await cleanupOrphanedCursorxAcpSessions(
+    params,
+    cursorxSessionsBeforeCleanup,
+  );
+  if (cursorxSessions.length >= maxSessions) {
+    return stopWithText(
+      `${sandboxText}\n\n` +
+        `⚠️ Cursor ACP session limit reached (${cursorxSessions.length}/${maxSessions}). ` +
+        "Run /cursor-stop all to close existing Cursor sessions.",
+    );
+  }
   const spawnTokens = [
     harnessId,
     "--mode",
     "persistent",
     "--thread",
-    "here",
+    threadMode,
     "--cwd",
     workspacePath,
     "--label",

@@ -20,6 +20,10 @@
         "type": "string",
         "enum": ["approve-all", "approve-reads", "deny-all"]
       },
+      "maxSessions": {
+        "type": "integer",
+        "minimum": 1
+      },
       "autoApproveMcpServers": {
         "type": "boolean"
       },
@@ -50,6 +54,10 @@
     "permissionMode": {
       "label": "Permission Mode",
       "help": "Permission policy used when Cursor ACP requests tool approvals."
+    },
+    "maxSessions": {
+      "label": "Max Cursor ACP Sessions",
+      "help": "Maximum number of concurrent Cursor-backed ACP sessions (default: 5)."
     },
     "autoApproveMcpServers": {
       "label": "Auto Approve MCP Servers",
