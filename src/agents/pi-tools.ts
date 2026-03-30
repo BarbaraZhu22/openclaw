@@ -1,4 +1,5 @@
 import { codingTools, createReadTool, readTool } from "@mariozechner/pi-coding-agent";
+import { readAcpSessionEntry } from "../acp/runtime/session-meta.js";
 import type { OpenClawConfig } from "../config/config.js";
 import type { ModelCompatConfig } from "../config/types.models.js";
 import type { ToolLoopDetectionConfig } from "../config/types.tools.js";
@@ -89,6 +90,35 @@ function applyMessageProviderToolPolicy(
   }
   const deniedSet = new Set(deniedTools);
   return tools.filter((tool) => !deniedSet.has(tool.name));
+}
+
+function applyFeishuCursorxToolPolicy(
+  tools: AnyAgentTool[],
+  params?: { messageProvider?: string; sessionKey?: string; config?: OpenClawConfig },
+): AnyAgentTool[] {
+  if (normalizeMessageProvider(params?.messageProvider) !== "feishu") {
+    return tools;
+  }
+  const sessionKey = params?.sessionKey?.trim();
+  if (!sessionKey) {
+    return tools;
+  }
+  const entry = readAcpSessionEntry({
+    sessionKey,
+    cfg: params?.config,
+  });
+  const backend = entry?.acp?.backend?.trim().toLowerCase();
+  const likelyCursorxSessionKey = sessionKey.toLowerCase().includes(":acp:cursor");
+  if (backend !== "cursorx" && !likelyCursorxSessionKey) {
+    return tools;
+  }
+  return tools.filter((tool) => {
+    const pluginId = getPluginToolMeta(tool)?.pluginId?.trim().toLowerCase();
+    if (pluginId === "feishu") {
+      return false;
+    }
+    return !tool.name.trim().toLowerCase().startsWith("feishu_");
+  });
 }
 
 function applyModelProviderToolPolicy(
@@ -195,6 +225,7 @@ export const __testing = {
   wrapToolParamNormalization,
   assertRequiredParams,
   applyModelProviderToolPolicy,
+  applyFeishuCursorxToolPolicy,
 } as const;
 
 export function createOpenClawCodingTools(options?: {
@@ -571,7 +602,12 @@ export function createOpenClawCodingTools(options?: {
     toolsForMemoryFlush,
     options?.messageProvider,
   );
-  const toolsForModelProvider = applyModelProviderToolPolicy(toolsForMessageProvider, {
+  const toolsForFeishuCursorx = applyFeishuCursorxToolPolicy(toolsForMessageProvider, {
+    messageProvider: options?.messageProvider,
+    sessionKey: options?.sessionKey,
+    config: options?.config,
+  });
+  const toolsForModelProvider = applyModelProviderToolPolicy(toolsForFeishuCursorx, {
     modelCompat: options?.modelCompat,
   });
   // Security: treat unknown/undefined as unauthorized (opt-in, not opt-out)

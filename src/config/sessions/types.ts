@@ -65,6 +65,23 @@ export type AcpSessionRuntimeOptions = {
   backendExtras?: Record<string, string>;
 };
 
+export type CursorxSlotId = "cursor1" | "cursor2" | "cursor3" | "cursor4" | "cursor5";
+
+export type CursorxSlotState = {
+  /** Backing ACP session key once slot setup completes. */
+  acpSessionKey?: string;
+  /** Optional intent captured from start-ai-project metadata. */
+  intent?: string;
+  /** Sandbox workspace path selected for this slot. */
+  workspacePath?: string;
+  /** True while this slot is in wizard/setup phase before ACP spawn. */
+  wizardPending?: boolean;
+  /** Last mutation timestamp for this slot state. */
+  updatedAt: number;
+};
+
+export type CursorxSlots = Partial<Record<CursorxSlotId, CursorxSlotState>>;
+
 export type SessionEntry = {
   /**
    * Last delivered heartbeat payload (used to suppress duplicate heartbeat notifications).
@@ -184,6 +201,8 @@ export type SessionEntry = {
   systemPromptReport?: SessionSystemPromptReport;
   /** Marks an in-progress `/cursor-start` wizard so plain follow-ups continue command dispatch. */
   cursorStartPending?: boolean;
+  /** Cursorx per-host fixed slot mappings (`cursor1`..`cursor5`). */
+  cursorxSlots?: CursorxSlots;
   acp?: SessionAcpMeta;
 };
 

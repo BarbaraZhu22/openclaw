@@ -248,6 +248,7 @@ async function cleanupFailedSpawn(params: {
 export async function handleAcpSpawnAction(
   params: HandleCommandsParams,
   restTokens: string[],
+  options?: { sessionKeyOverride?: string },
 ): Promise<CommandHandlerResult> {
   if (!isAcpEnabledByPolicy(params.cfg)) {
     return stopWithText("ACP is disabled by policy (`acp.enabled=false`).");
@@ -278,7 +279,7 @@ export async function handleAcpSpawnAction(
   }
 
   const acpManager = getAcpSessionManager();
-  const sessionKey = `agent:${spawn.agentId}:acp:${randomUUID()}`;
+  const sessionKey = options?.sessionKeyOverride?.trim() || `agent:${spawn.agentId}:acp:${randomUUID()}`;
 
   let initializedBackend = "";
   let initializedMeta: SessionAcpMeta | undefined;

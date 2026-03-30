@@ -123,6 +123,17 @@ export function buildBroadcastSessionKey(
   return baseSessionKey;
 }
 
+function isCursorSessionControlCommand(commandProbeBody: string): boolean {
+  const normalized = commandProbeBody.trim().toLowerCase();
+  if (/^\/cursor-start(?:\b|$)/.test(normalized)) {
+    return true;
+  }
+  if (/^\/cursor[1-5](?:\b|$)/.test(normalized)) {
+    return true;
+  }
+  return /^\/cursor-all\s+stop(?:\b|$)/.test(normalized);
+}
+
 /**
  * Build media payload for inbound context.
  * Similar to Discord's buildDiscordMediaPayload().
@@ -356,6 +367,8 @@ export async function handleFeishuMessage(params: {
   const broadcastAgents = rawBroadcastAgents
     ? [...new Set(rawBroadcastAgents.map((id) => normalizeAgentId(id)))]
     : null;
+  const commandProbeBody = isGroup ? normalizeFeishuCommandProbeBody(ctx.content) : ctx.content;
+  const cursorSessionControlCommand = isCursorSessionControlCommand(commandProbeBody);
 
   let requireMention = false; // DMs never require mention; groups may override below
   if (isGroup) {
@@ -419,6 +432,25 @@ export async function handleFeishuMessage(params: {
       groupPolicy,
     }));
 
+    if (!cursorSessionControlCommand) {
+      const replyTargetMessageId =
+        groupSession?.groupSessionScope === "group_topic" ||
+        groupSession?.groupSessionScope === "group_topic_sender"
+          ? (ctx.rootId ?? ctx.messageId)
+          : ctx.messageId;
+      await sendMessageFeishu({
+        cfg,
+        to: `chat:${ctx.chatId}`,
+        text: "Please use /cursor-start to start a project first.",
+        replyToMessageId: replyTargetMessageId,
+        replyInThread: groupSession?.replyInThread ?? false,
+        accountId: account.accountId,
+      }).catch((err) => {
+        log(`feishu[${account.accountId}]: failed to send cursor-only group guidance: ${String(err)}`);
+      });
+      return;
+    }
+
     if (requireMention && !ctx.mentionedBot) {
       log(`feishu[${account.accountId}]: message in group ${ctx.chatId} did not mention bot`);
       // Record to pending history for non-broadcast groups only. For broadcast groups,
@@ -450,7 +482,6 @@ export async function handleFeishuMessage(params: {
       channel: "feishu",
       accountId: account.accountId,
     });
-    const commandProbeBody = isGroup ? normalizeFeishuCommandProbeBody(ctx.content) : ctx.content;
     const shouldComputeCommandAuthorized = core.channel.commands.shouldComputeCommandAuthorized(
       commandProbeBody,
       cfg,
@@ -580,7 +611,7 @@ export async function handleFeishuMessage(params: {
     const currentConversationId = peerId;
     const parentConversationId = isGroup ? (parentPeer?.id ?? ctx.chatId) : undefined;
     let configuredBinding = null;
-    if (feishuAcpConversationSupported) {
+    if (feishuAcpConversationSupported && !cursorSessionControlCommand) {
       const configuredRoute = resolveConfiguredBindingRoute({
         cfg: effectiveCfg,
         route,
